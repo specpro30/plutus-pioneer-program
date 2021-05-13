@@ -45,25 +45,25 @@ import           Prelude                   (Semigroup (..))
 import qualified Prelude                   as Prelude
 
 data Oracle = Oracle                                                  -- The Oracle is a paramaterized contract and the data type called Oracle is the parameter
-    { oSymbol   :: !CurrencySymbol
-    , oOperator :: !PubKeyHash
-    , oFee      :: !Integer
-    , oAsset    :: !AssetClass
-    } deriving (Show, Generic, FromJSON, ToJSON, Prelude.Eq, Prelude.Ord)
+    { oSymbol   :: !CurrencySymbol                                    -- First of four fields is the oSymbol which is the currency symbol of the NFT. Token Name is just empty string 
+    , oOperator :: !PubKeyHash                                        -- oOperator is the owner of the Oracle and is the only one that can make updates where as anyone can use
+    , oFee      :: !Integer                                           -- oFee is the fees in Lovelace that is required everytime someone uses the Oracle
+    , oAsset    :: !AssetClass                                        -- is the target of the swap contract and in this case is the USD token 
+    } deriving (Show, Generic, FromJSON, ToJSON, Prelude.Eq, Prelude.Ord) -- boiler plate code of type classes required to be serializable
 
-PlutusTx.makeLift ''Oracle
+PlutusTx.makeLift ''Oracle                                            -- boiler plate for liftable
 
-data OracleRedeemer = Update | Use
+data OracleRedeemer = Update | Use                                    -- here we define the redeemer to have two use cases: update and use 
     deriving Show
 
-PlutusTx.unstableMakeIsData ''OracleRedeemer
+PlutusTx.unstableMakeIsData ''OracleRedeemer                          -- use template haskell to implment IsData for the Oracle Redeemer data type 
 
-{-# INLINABLE oracleTokenName #-}
-oracleTokenName :: TokenName
-oracleTokenName = TokenName emptyByteString
+{-# INLINABLE oracleTokenName #-}                                     -- starting from here are some helper definitions
+oracleTokenName :: TokenName                                 
+oracleTokenName = TokenName emptyByteString                           -- using emptyByteString for the token name 
 
 {-# INLINABLE oracleAsset #-}
-oracleAsset :: Oracle -> AssetClass
+oracleAsset :: Oracle -> AssetClass                                   --oracleAsset is used to uniquely identify the UTXO of the NFT with the Oracle value. Recall that AssetClass requires currency sym and tn 
 oracleAsset oracle = AssetClass (oSymbol oracle, oracleTokenName)
 
 {-# INLINABLE oracleValue #-}
