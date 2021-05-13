@@ -44,7 +44,7 @@ import           Plutus.Contracts.Currency as Currency
 import           Prelude                   (Semigroup (..))
 import qualified Prelude                   as Prelude
 
-data Oracle = Oracle
+data Oracle = Oracle                                                  -- The Oracle is a paramaterized contract and the data type called Oracle is the parameter
     { oSymbol   :: !CurrencySymbol
     , oOperator :: !PubKeyHash
     , oFee      :: !Integer
