@@ -63,42 +63,44 @@ oracleTokenName :: TokenName
 oracleTokenName = TokenName emptyByteString                           -- using emptyByteString for the token name 
 
 {-# INLINABLE oracleAsset #-}
-oracleAsset :: Oracle -> AssetClass                                   --oracleAsset is used to uniquely identify the UTXO of the NFT with the Oracle value. Recall that AssetClass requires currency sym and tn 
+oracleAsset :: Oracle -> AssetClass                                   -- oracleAsset is used to uniquely identify the UTXO of the NFT with the Oracle value. Recall that AssetClass requires currency sym and tn 
 oracleAsset oracle = AssetClass (oSymbol oracle, oracleTokenName)
 
 {-# INLINABLE oracleValue #-}
-oracleValue :: TxOut -> (DatumHash -> Maybe Datum) -> Maybe Integer
-oracleValue o f = do
-    dh      <- txOutDatum o
-    Datum d <- f dh
-    PlutusTx.fromData d
+oracleValue :: TxOut -> (DatumHash -> Maybe Datum) -> Maybe Integer   -- TxOut is the output of the UTXO that holds the Oracle. We want to look up the dataum and turn into an integer 
+oracleValue o f = do                                                  -- do block is inside the Maybe Monad so the result of the bind can be nothing 
+    dh      <- txOutDatum o                                           -- getting Datum from TxOut (can fail and result in nothing) or succeed in which case we get dh (datum hash)
+    Datum d <- f dh                                                   -- f is the function we use to turn the dh into a Datum d
+    PlutusTx.fromData d                                               -- Use the PlutusTx.fromData to maybe turn d into an integer 
 
 {-# INLINABLE mkOracleValidator #-}
-mkOracleValidator :: Oracle -> Integer -> OracleRedeemer -> ScriptContext -> Bool
+mkOracleValidator :: Oracle -> Integer -> OracleRedeemer -> ScriptContext -> Bool    -- mkOracleValidator gets the parameter Oracle, Integer datum, redeemer type OracleRedeemer, ScriptContext and returns a Bool 
 mkOracleValidator oracle x r ctx =
-    traceIfFalse "token missing from input"  inputHasToken  &&
-    traceIfFalse "token missing from output" outputHasToken &&
+    traceIfFalse "token missing from input"  inputHasToken  &&                       -- checks to see if the input holds the NFT
+    traceIfFalse "token missing from output" outputHasToken &&                       -- checks to see if the output holds the NFT 
     case r of
         Update -> traceIfFalse "operator signature missing" (txSignedBy info $ oOperator oracle) &&
                   traceIfFalse "invalid output datum"       validOutputDatum
         Use    -> traceIfFalse "oracle value changed"       (outputDatum == Just x)              &&
                   traceIfFalse "fees not paid"              feesPaid
   where
-    info :: TxInfo
+    info :: TxInfo                                       -- takes the context and extracts the TxInfo from it 
     info = scriptContextTxInfo ctx
 
-    ownInput :: TxOut
-    ownInput = case findOwnInput ctx of
+    ownInput :: TxOut                                    -- the TxOut is the Oracle output that we are trying to consume 
+    ownInput = case findOwnInput ctx of                  -- need to verify 
         Nothing -> traceError "oracle input missing"
         Just i  -> txInInfoResolved i
 
-    inputHasToken :: Bool
-    inputHasToken = assetClassValueOf (txOutValue ownInput) (oracleAsset oracle) == 1
+    inputHasToken :: Bool                                                               -- helper function to check if the NFT token is present
+    inputHasToken = assetClassValueOf (txOutValue ownInput) (oracleAsset oracle) == 1   -- assetClassValueOf :: Value -> AssetClass -> Integer how many coins of that Asset Class are contained in the value
+                                                                                        -- should be only 1 coin for NFT 
+                                                                                        -- txOutValue ownInput is the Value attached to the input that we are consuming
 
-    ownOutput :: TxOut
-    ownOutput = case getContinuingOutputs ctx of
-        [o] -> o
-        _   -> traceError "expected exactly one oracle output"
+    ownOutput :: TxOut                                            -- checks to see if the use and update redeemers will produce exactly only one Oracle output 
+    ownOutput = case getContinuingOutputs ctx of                  -- getContinuingOutputs retreives a list from the context 
+        [o] -> o                                                  -- checks to see if there is only one output 
+        _   -> traceError "expected exactly one oracle output"    -- if there are one or more outputs then return an error 
 
     outputHasToken :: Bool
     outputHasToken = assetClassValueOf (txOutValue ownOutput) (oracleAsset oracle) == 1
