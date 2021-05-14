@@ -75,14 +75,14 @@ oracleValue o f = do                                                  -- do bloc
 
 {-# INLINABLE mkOracleValidator #-}
 mkOracleValidator :: Oracle -> Integer -> OracleRedeemer -> ScriptContext -> Bool    -- mkOracleValidator gets the parameter Oracle, Integer datum, redeemer type OracleRedeemer, ScriptContext and returns a Bool 
-mkOracleValidator oracle x r ctx =
+mkOracleValidator oracle x r ctx =                                                   -- x is the old Oracle value 
     traceIfFalse "token missing from input"  inputHasToken  &&                       -- checks to see if the input holds the NFT
     traceIfFalse "token missing from output" outputHasToken &&                       -- checks to see if the output holds the NFT 
     case r of
-        Update -> traceIfFalse "operator signature missing" (txSignedBy info $ oOperator oracle) &&
-                  traceIfFalse "invalid output datum"       validOutputDatum
-        Use    -> traceIfFalse "oracle value changed"       (outputDatum == Just x)              &&
-                  traceIfFalse "fees not paid"              feesPaid
+        Update -> traceIfFalse "operator signature missing" (txSignedBy info $ oOperator oracle) &&    -- checks to see if the operator of the Oracle has signed withe the PubKeyHash from oOperator  
+                  traceIfFalse "invalid output datum"       validOutputDatum                           -- chcecks that the outputDatum is an integer. since value is not checked operator can retreive fees
+        Use    -> traceIfFalse "oracle value changed"       (outputDatum == Just x)              &&    -- checks to see if the Datum has changed. Use does not allow datum to change 
+                  traceIfFalse "fees not paid"              feesPaid                                   -- checks if fee are paid 
   where
     info :: TxInfo                                       -- takes the context and extracts the TxInfo from it 
     info = scriptContextTxInfo ctx
@@ -92,61 +92,66 @@ mkOracleValidator oracle x r ctx =
         Nothing -> traceError "oracle input missing"
         Just i  -> txInInfoResolved i
 
-    inputHasToken :: Bool                                                               -- helper function to check if the NFT token is present
+    inputHasToken :: Bool                                                               -- helper function to check if the NFT token is present. checks to see if Oracle input carries NFT
     inputHasToken = assetClassValueOf (txOutValue ownInput) (oracleAsset oracle) == 1   -- assetClassValueOf :: Value -> AssetClass -> Integer how many coins of that Asset Class are contained in the value
                                                                                         -- should be only 1 coin for NFT 
                                                                                         -- txOutValue ownInput is the Value attached to the input that we are consuming
 
     ownOutput :: TxOut                                            -- checks to see if the use and update redeemers will produce exactly only one Oracle output 
-    ownOutput = case getContinuingOutputs ctx of                  -- getContinuingOutputs retreives a list from the context 
+    ownOutput = case getContinuingOutputs ctx of                  -- getContinuingOutputs retreives a list from the context of outputs going to Oracle address 
         [o] -> o                                                  -- checks to see if there is only one output 
-        _   -> traceError "expected exactly one oracle output"    -- if there are one or more outputs then return an error 
+        _   -> traceError "expected exactly one oracle output"    -- if there are zero or more than one outputs then return an error 
 
     outputHasToken :: Bool
-    outputHasToken = assetClassValueOf (txOutValue ownOutput) (oracleAsset oracle) == 1
+    outputHasToken = assetClassValueOf (txOutValue ownOutput) (oracleAsset oracle) == 1    -- checks to see if Oracle output carries the NFT
 
-    outputDatum :: Maybe Integer
-    outputDatum = oracleValue ownOutput (`findDatum` info)
+    outputDatum :: Maybe Integer                                  -- checks to see if it is a valid integer 
+    outputDatum = oracleValue ownOutput (`findDatum` info)        -- findDatum takes the info and the datum hash and tries to look up the corresponding datum 
 
     validOutputDatum :: Bool
-    validOutputDatum = isJust outputDatum
+    validOutputDatum = isJust outputDatum    -- checks that the outputDatum is not nothing.  If it is something then return true 
 
     feesPaid :: Bool
     feesPaid =
       let
-        inVal  = txOutValue ownInput
-        outVal = txOutValue ownOutput
+        inVal  = txOutValue ownInput    -- check the value attached to the Oracle input 
+        outVal = txOutValue ownOutput   -- check the value attached to the Oracle output 
       in
-        outVal `geq` (inVal <> Ada.lovelaceValueOf (oFee oracle))
+        outVal `geq` (inVal <> Ada.lovelaceValueOf (oFee oracle))    -- output should be at least as large as the input plus the fees. <> Semigroup operator to combine values. Ada.lovelaceValueOf to lovelace val
 
-data Oracling
+data Oracling                           -- boiler plate helper function to combine the Datum type and the Redeemer type 
 instance Scripts.ScriptType Oracling where
     type instance DatumType Oracling = Integer
     type instance RedeemerType Oracling = OracleRedeemer
 
-oracleInst :: Oracle -> Scripts.ScriptInstance Oracling
-oracleInst oracle = Scripts.validator @Oracling
+oracleInst :: Oracle -> Scripts.ScriptInstance Oracling    -- template Haskell used to compile into a script instance 
+oracleInst oracle = Scripts.validator @Oracling            -- because it is parameterized the liftCode is necessary to lift it into the Plutus script 
     ($$(PlutusTx.compile [|| mkOracleValidator ||]) `PlutusTx.applyCode` PlutusTx.liftCode oracle)
     $$(PlutusTx.compile [|| wrap ||])
   where
     wrap = Scripts.wrapValidator @Integer @OracleRedeemer
 
-oracleValidator :: Oracle -> Validator
+oracleValidator :: Oracle -> Validator    -- boiler plate code to turn it into a validator 
 oracleValidator = Scripts.validatorScript . oracleInst
 
-oracleAddress :: Oracle -> Ledger.Address
+oracleAddress :: Oracle -> Ledger.Address -- boiler plate code to turn validator into an script Oracle address 
 oracleAddress = scriptAddress . oracleValidator
 
-data OracleParams = OracleParams
-    { opFees   :: !Integer
-    , opSymbol :: !CurrencySymbol
-    , opToken  :: !TokenName
+-- Above code is for the on-chain part of the Oracle and the below code is the off-chain part of the Oracle 
+-- Note that the Oracle provider only needs to provision the "update" function. The "use" function is not part of the Oracle off-chain code 
+
+data OracleParams = OracleParams    -- parameters required to start the Oracle 
+    { opFees   :: !Integer          -- fees that we want to charge
+    , opSymbol :: !CurrencySymbol   -- CS of the Asset that we would like to swap Ada for 
+    , opToken  :: !TokenName        -- TokenName of Asset that we would like to swap Ada for 
     } deriving (Show, Generic, FromJSON, ToJSON)
 
-startOracle :: forall w s. HasBlockchainActions s => OracleParams -> Contract w s Text Oracle
+startOracle :: forall w s. HasBlockchainActions s => OracleParams -> Contract w s Text Oracle -- startOracle only mints the NFT. To ensure Oracle has update price info, assigning value is left to update function 
 startOracle op = do
     pkh <- pubKeyHash <$> Contract.ownPubKey
     osc <- mapError (pack . show) (forgeContract pkh [(oracleTokenName, 1)] :: Contract w s CurrencyError OneShotCurrency)
+    -- show will get the string of the CurrencyError. pack converts the string into text. mapError is used for custom error messages. forgeContract is a function that mints various tokens of name and qty
+    -- the CurrencyError type needs to be specified (e')
     let cs     = Currency.currencySymbol osc
         oracle = Oracle
             { oSymbol   = cs
