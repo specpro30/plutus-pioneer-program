@@ -151,57 +151,60 @@ startOracle op = do
     pkh <- pubKeyHash <$> Contract.ownPubKey
     osc <- mapError (pack . show) (forgeContract pkh [(oracleTokenName, 1)] :: Contract w s CurrencyError OneShotCurrency)
     -- show will get the string of the CurrencyError. pack converts the string into text. mapError is used for custom error messages. forgeContract is a function that mints various tokens of name and qty
-    -- the CurrencyError type needs to be specified (e')
-    let cs     = Currency.currencySymbol osc
+    -- the CurrencyError type needs to be specified for "show"
+    let cs     = Currency.currencySymbol osc    -- gets the currencySymbol cs from osc 
         oracle = Oracle
-            { oSymbol   = cs
-            , oOperator = pkh
-            , oFee      = opFees op
-            , oAsset    = AssetClass (opSymbol op, opToken op)
+            { oSymbol   = cs                                     -- currencySymbol from above
+            , oOperator = pkh                                    -- pkh from above 
+            , oFee      = opFees op                              -- from OracleParams 
+            , oAsset    = AssetClass (opSymbol op, opToken op)   -- from OracleParams 
             }
     logInfo @String $ "started oracle " ++ show oracle
     return oracle
 
-updateOracle :: forall w s. HasBlockchainActions s => Oracle -> Integer -> Contract w s Text ()
-updateOracle oracle x = do
-    m <- findOracle oracle
-    let c = Constraints.mustPayToTheScript x $ assetClassValue (oracleAsset oracle) 1
+updateOracle :: forall w s. HasBlockchainActions s => Oracle -> Integer -> Contract w s Text ()  -- handles the case where Oracle just started has no UTXO, Oracle already started and has value 
+updateOracle oracle x = do                                                                       -- Integer is the value we want to update the Oracle to 
+    m <- findOracle oracle    -- helper fucntion that looks up an existing Oracle UTXO. fails if Oracle hasn't started and or not assigned value yet
+    let c = Constraints.mustPayToTheScript x $ assetClassValue (oracleAsset oracle) 1    -- Constraint c is defined here by stating that tx must have output to be paid to a script address (mustPayToTheScript) 
+                                                                                         -- providing the datum x and the NFT from the assetClassValue 
     case m of
-        Nothing -> do
+        Nothing -> do         -- first case is started the Oracle but haven't provided the inital value yet. need to produce the first tx with the first output of Ada price in USD 
             ledgerTx <- submitTxConstraints (oracleInst oracle) c
             awaitTxConfirmed $ txId ledgerTx
             logInfo @String $ "set initial oracle value to " ++ show x
-        Just (oref, o,  _) -> do
-            let lookups = Constraints.unspentOutputs (Map.singleton oref o)     <>
-                          Constraints.scriptInstanceLookups (oracleInst oracle) <>
-                          Constraints.otherScript (oracleValidator oracle)
-                tx      = c <> Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toData Update)
-            ledgerTx <- submitTxConstraintsWith @Oracling lookups tx
+        Just (oref, o,  _) -> do -- second case is we already have Oracle UTXO so we need to consume it first and then update datum. _ is used as we don't care about the old Datum. 
+            let lookups = Constraints.unspentOutputs (Map.singleton oref o)     <>    -- creates a list of one key value pair of outputs we want to consume 
+                          Constraints.scriptInstanceLookups (oracleInst oracle) <>    -- ??
+                          Constraints.otherScript (oracleValidator oracle)            -- ??
+                tx      = c <> Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toData Update) -- mustSpendScriptOutput because we first must consume the existing UTXO - it takes the update redeemer
+            ledgerTx <- submitTxConstraintsWith @Oracling lookups tx    -- @Oracling to define the data types.  All fee payments to and from Oracle are handled automatically
             awaitTxConfirmed $ txId ledgerTx
             logInfo @String $ "updated oracle value to " ++ show x
 
-findOracle :: forall w s. HasBlockchainActions s => Oracle -> Contract w s Text (Maybe (TxOutRef, TxOutTx, Integer))
+findOracle :: forall w s. HasBlockchainActions s => Oracle -> Contract w s Text (Maybe (TxOutRef, TxOutTx, Integer))    -- TxOutRef is the id of UTXO, TXOutTx is the UTXO, Integer is current exchange rate 
 findOracle oracle = do
-    utxos <- Map.filter f <$> utxoAt (oracleAddress oracle)
-    return $ case Map.toList utxos of
-        [(oref, o)] -> do
-            x <- oracleValue (txOutTxOut o) $ \dh -> Map.lookup dh $ txData $ txOutTxTx o
-            return (oref, o, x)
-        _           -> Nothing
+    utxos <- Map.filter f <$> utxoAt (oracleAddress oracle)    -- utxoAt gets all the UTXO sitting at Oracle address. Map.filter creates a list of either 1 or 0 addresses with NFT 
+    return $ case Map.toList utxos of    -- converts the map into a list of key value pairs with the Map.toList function 
+        [(oref, o)] -> do                -- first case is we find one element 
+            x <- oracleValue (txOutTxOut o) $ \dh -> Map.lookup dh $ txData $ txOutTxTx o    -- checks to see if the datum is valid and not corrupted. If ok then x will be the integer value of Datum 
+                                                                                             -- txOutTxOut gets the TxOut from o. txOutTxTx o gives us a transaction
+            return (oref, o, x)          -- if element is found then the triple is returned
+        _           -> Nothing           -- second case is we find all other cases in which case we return nothing 
   where
     f :: TxOutTx -> Bool
-    f o = assetClassValueOf (txOutValue $ txOutTxOut o) (oracleAsset oracle) == 1
+    f o = assetClassValueOf (txOutValue $ txOutTxOut o) (oracleAsset oracle) == 1    -- Checks that the UTXO has only 1 NFT 
 
-type OracleSchema = BlockchainActions .\/ Endpoint "update" Integer
+type OracleSchema = BlockchainActions .\/ Endpoint "update" Integer    -- a helper function for Plutus Playground that combines the startOracle and updateOracle. update endpoint takes new value as param  
 
 runOracle :: OracleParams -> Contract (Last Oracle) OracleSchema Text ()
 runOracle op = do
-    oracle <- startOracle op
-    tell $ Last $ Just oracle
-    go oracle
+    oracle <- startOracle op -- starts the Oracle by minting NFT only 
+    tell $ Last $ Just oracle -- use tell to write the Oracle value because need to communicate to outside world since we don't know the value yet before run time 
+                              -- Last Monoid remembers the Last Just value so that the current Ada price is always returned to users of Oracle 
+    go oracle -- go starts the oracle and loops forever 
   where
     go :: Oracle -> Contract (Last Oracle) OracleSchema Text a
     go oracle = do
-        x <- endpoint @"update"
+        x <- endpoint @"update" -- blocks at update and as soon as an Integer (new price of Ada) is provided updateOracle is called and then go oracle is looped again
         updateOracle oracle x
         go oracle
