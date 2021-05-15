@@ -11,7 +11,7 @@
 {-# LANGUAGE TypeFamilies          #-}
 {-# LANGUAGE TypeOperators         #-}
 
-module Week06.Oracle.Swap
+module Week06.Oracle.Swap    -- smart contract that takes Ada and swaps it for USDT. The price in USDT for the Ada will change overtime depending on Oracle 
     ( SwapSchema
     , swap
     ) where
@@ -36,64 +36,71 @@ import           Week06.Oracle.Core
 import           Week06.Oracle.Funds
 
 {-# INLINABLE price #-}
-price :: Integer -> Integer -> Integer
+price :: Integer -> Integer -> Integer    -- helper function that calculates the price of Ada 
 price lovelace exchangeRate = (lovelace * exchangeRate) `divide` 1000000
 
 {-# INLINABLE lovelaces #-}
-lovelaces :: Value -> Integer
+lovelaces :: Value -> Integer             -- helper function that converts a given value to lovelaces (Value to Ada to lovelaces) 
 lovelaces = Ada.getLovelace . Ada.fromValue
 
 {-# INLINABLE mkSwapValidator #-}
-mkSwapValidator :: Oracle -> Address -> PubKeyHash -> () -> ScriptContext -> Bool
-mkSwapValidator oracle addr pkh () ctx =
-    txSignedBy info pkh ||
-    (traceIfFalse "expected exactly two script inputs" hasTwoScriptInputs &&
-     traceIfFalse "price not paid"                     sellerPaid)
+mkSwapValidator :: Oracle -> Address -> PubKeyHash -> () -> ScriptContext -> Bool    -- this contract takes two parameters Oracle and Oracle Address. Address (given explicitly) is the address of the Oracle
+                                                                                     -- for Datum we use PubKeyHas of the seller of the Ada. 
+mkSwapValidator oracle addr pkh () ctx =    -- takes two script inputs and another input: 1) Oracle for exchange rate 2) Swap outputs with lovelaces; other input is the funds from buyer
+                                            -- produces three outputs: 1) Oracle output (taken care of by Oracle Validator), 2) seller gets USDT, 3) buyer gets lovelaces 
+    txSignedBy info pkh ||                  -- This is the case where the seller signs the swap contract to get back the Ada that they intended to swap 
+    (traceIfFalse "expected exactly two script inputs" hasTwoScriptInputs &&         -- This is the second case where the swap occurs. Check inputs of Oracle and Swap outputs 
+     traceIfFalse "price not paid"                     sellerPaid)                   -- check seller gets paid 
 
   where
     info :: TxInfo
     info = scriptContextTxInfo ctx
 
-    oracleInput :: TxOut
+    oracleInput :: TxOut                    -- helper function to find the Oracle inputs (Oracle input consumes the Oracle output) 
     oracleInput =
       let
         ins = [ o
-              | i <- txInfoInputs info
-              , let o = txInInfoResolved i
-              , txOutAddress o == addr
+              | i <- txInfoInputs info      -- i gets a list of all inputs from the info field
+              , let o = txInInfoResolved i  -- computes the corresponding outputs given a list of i inputs 
+              , txOutAddress o == addr      -- gets all inputs with corresponding output o that sits at the Oracle Address (addr). This filter of the list comprehension keeps all the 'o's   
               ]
       in
         case ins of
-            [o] -> o
-            _   -> traceError "expected exactly one oracle input"
+            [o] -> o                                                   -- checks that there is exactly one 'o' which means there is only one Oracle input (since it is an NFT?)
+            _   -> traceError "expected exactly one oracle input"      -- given any other result '_' throw an expection
 
-    oracleValue' = case oracleValue oracleInput (`findDatum` info) of
-        Nothing -> traceError "oracle value not found"
-        Just x  -> x
+    oracleValue' = case oracleValue oracleInput (`findDatum` info) of  -- check exchange rate with helper function oracleValue which given the output where the Oracle sits it comuptes the datum (exchange rate)
+                                                                       -- findDatum info looks up datum to a hash
+        Nothing -> traceError "oracle value not found"                 -- fails to find an Oracle input
+        Just x  -> x                                                   -- succeeds to find Oracle input and Datum and returns the exchange rate
 
     hasTwoScriptInputs :: Bool
     hasTwoScriptInputs =
       let
-        xs = filter (isJust . toValidatorHash . txOutAddress . txInInfoResolved) $ txInfoInputs info
+        xs = filter (isJust . toValidatorHash . txOutAddress . txInInfoResolved) $ txInfoInputs info -- txInfoInputs info loops over all the inputs. Filter for all the outputs of the inputs (txInInfoResolved)
+                                                                                                     -- Filter the address for the output (txOutAddress), validator hash of the output (toValidatorHash,
+                                                                                                     -- hash if script and nothing if public key), isJust then returns True for something the False for nothing 
+                                                                                                     -- xs is now a list of all script inputs 
       in
-        length xs == 2
+        length xs == 2                                                                               -- check that xs is length 2 as we expect the two inputs of the Oracle and the Swap itself
 
-    minPrice :: Integer
+    minPrice :: Integer                                             -- compute the minimum price in USDT that needs to be paid by buyer
     minPrice =
       let
-        lovelaceIn = case findOwnInput ctx of
-            Nothing -> traceError "own input not found"
-            Just i  -> lovelaces $ txOutValue $ txInInfoResolved i
+        lovelaceIn = case findOwnInput ctx of                       -- findOwnInput gives the input that has just been validated which is the swap input 
+            Nothing -> traceError "own input not found"             -- if it doesn't find any then return error
+            Just i  -> lovelaces $ txOutValue $ txInInfoResolved i  -- otherwise calculate the amount of lovelace to be sold by getting it from using the helper function lovalaces to compute the amount from
+                                                                    -- the value found (txOutValue) from the outputs (txInInfoResolved i)
       in
-        price lovelaceIn oracleValue'
+        price lovelaceIn oracleValue'                               -- multiply amount of lovelace found by the current price from Oracle to get the minPrice to be paid for the lovelaces 
 
-    sellerPaid :: Bool
+    sellerPaid :: Bool                                                         -- now we check that the seller has paid 
     sellerPaid =
       let
         pricePaid :: Integer
-        pricePaid =  assetClassValueOf (valuePaidTo info pkh) (oAsset oracle)
+        pricePaid =  assetClassValueOf (valuePaidTo info pkh) (oAsset oracle)  -- using valuePaidTo info pkh to lookup all the available outputs of pkh's wallet in USDT (oAsset oracle)
       in
-        pricePaid >= minPrice
+        pricePaid >= minPrice                                                  -- check the amount paid is larger than minPrice (allow for gratuity)
 
 data Swapping
 instance Scripts.ScriptType Swapping where
