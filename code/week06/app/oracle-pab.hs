@@ -42,47 +42,54 @@ import qualified Week06.Oracle.Core                  as Oracle
 import           Week06.Oracle.PAB                   (OracleContracts (..))
 import qualified Week06.Oracle.Swap                  as Oracle
 
-main :: IO ()
-main = void $ Simulator.runSimulationWith handlers $ do
+main :: IO ()                                              -- as the code is in the main :: IO () it will be an executable 
+main = void $ Simulator.runSimulationWith handlers $ do    -- uses the Simulator Monad that is specific to the PAB. Similar to the emulator trace Monad. Can start contracts on wallets, inspect states, etc 
+                                                           -- The Simulator Monad will change soon (aligned with emulator trace monad) so check again when it is finalized 
     Simulator.logString @(Builtin OracleContracts) "Starting Oracle PAB webserver. Press enter to exit."
     shutdown <- PAB.Server.startServerDebug
 
-    cidInit <- Simulator.activateContract (Wallet 1) Init
-    cs      <- waitForLast cidInit
-    _       <- Simulator.waitUntilFinished cidInit
+    -- Can do the below through the web instead. Use this scripted way for demonstration
+    -- Can check what APIs are availabe at github.com/input-output-hk/plutus/blob/master/plutus-pab/src/Plutus/PAB/Webserver/API.hs 
+    -- Makes use of Haskell libary Servant to write type safe web applications
 
-    cidOracle <- Simulator.activateContract (Wallet 1) $ Oracle cs
-    liftIO $ writeFile "oracle.cid" $ show $ unContractInstanceId cidOracle
-    oracle <- waitForLast cidOracle
+    cidInit <- Simulator.activateContract (Wallet 1) Init  -- launches the Init Contract on Wallet 1 
+    cs      <- waitForLast cidInit                         -- this line will block until Init contract has minted the USD and has distributed USD to other wallets, and then it will return cs (Currency Symbol)
+    _       <- Simulator.waitUntilFinished cidInit         -- wait until init contract has finished 
+
+    cidOracle <- Simulator.activateContract (Wallet 1) $ Oracle cs           -- start Oracle on Wallet 1.  Oracle cs runs Oracle with parameter cs (Currency Symbol)
+                                                                             -- Need cidOracle (UUID handle to the Oracle contract) to talk to web interface
+    liftIO $ writeFile "oracle.cid" $ show $ unContractInstanceId cidOracle  -- liftIO allows Simulator Monad to have side effects unlike emulator trace monad. UUID is writ into oracle.cid file for demo only
+    oracle <- waitForLast cidOracle                                          -- use waitForLast to get the Oracle value (Swap contract is parameterized by this value) 
 
     forM_ wallets $ \w ->
-        when (w /= Wallet 1) $ do
-            cid <- Simulator.activateContract w $ Swap oracle
-            liftIO $ writeFile ('W' : show (getWallet w) ++ ".cid") $ show $ unContractInstanceId cid
+        when (w /= Wallet 1) $ do                                                                       -- loop over other wallets besides wallet 1 which is running the Oracle 
+            cid <- Simulator.activateContract w $ Swap oracle                                           -- activate swap contract for that wallet 
+            liftIO $ writeFile ('W' : show (getWallet w) ++ ".cid") $ show $ unContractInstanceId cid   -- write the contract instance ids to a file like we did for oracle.cid 
 
-    void $ liftIO getLine
-    shutdown
+    void $ liftIO getLine  -- block until user presses enter 
+    shutdown               -- shutdown the server 
 
 waitForLast :: FromJSON a => ContractInstanceId -> Simulator.Simulation t a
-waitForLast cid =
-    flip Simulator.waitForState cid $ \json -> case fromJSON json of
-        Success (Last (Just x)) -> Just x
-        _                       -> Nothing
+waitForLast cid =                           -- will block until we get a Just 
+    flip Simulator.waitForState cid $ \json -> case fromJSON json of   -- use fromJSON to pass a JSON if succeed then get a 'Last a' 
+        Success (Last (Just x)) -> Just x   -- if the result of applying the custom predicate to the json value is Just x then it returns the x. If succeed then we get the Last of Just of a state value 
+                                            -- It can fail if we get a Last Nothing instead of a Just 
+        _                       -> Nothing  -- if the result of applying the custom predicate to the json value is Nothing then it will wait more until state changes again 
 
 wallets :: [Wallet]
-wallets = [Wallet i | i <- [1 .. 5]]
+wallets = [Wallet i | i <- [1 .. 5]]  -- the number of wallets used in simulation 
 
 usdt :: TokenName
 usdt = "USDT"
 
 oracleParams :: CurrencySymbol -> Oracle.OracleParams
 oracleParams cs = Oracle.OracleParams
-    { Oracle.opFees   = 1_000_000
-    , Oracle.opSymbol = cs
-    , Oracle.opToken  = usdt
+    { Oracle.opFees   = 1_000_000                           -- fee is one Ada 
+    , Oracle.opSymbol = cs                                  -- currency symbol cs is a provided argument 
+    , Oracle.opToken  = usdt                                -- token is hardcoded USDT 
     }
 
-handleOracleContracts ::
+handleOracleContracts ::                                                   -- boiler plate code to hook up the data types of contract instances with actual contracts 
     ( Member (Error PABError) effs
     , Member (LogMsg (PABMultiAgentMsg (Builtin OracleContracts))) effs
     )
@@ -90,34 +97,34 @@ handleOracleContracts ::
     ~> Eff effs
 handleOracleContracts = handleBuiltin getSchema getContract where
     getSchema = \case
-        Init     -> endpointsToSchemas @Empty
+        Init     -> endpointsToSchemas @Empty                              -- Init has no schema and just Blockchain actions 
         Oracle _ -> endpointsToSchemas @(Oracle.OracleSchema .\\ BlockchainActions)
         Swap _   -> endpointsToSchemas @(Oracle.SwapSchema   .\\ BlockchainActions)
     getContract = \case
-        Init        -> SomeBuiltin   initContract
-        Oracle cs   -> SomeBuiltin $ Oracle.runOracle $ oracleParams cs
-        Swap oracle -> SomeBuiltin $ Oracle.swap oracle
+        Init        -> SomeBuiltin   initContract                          -- Init runs the initContract defined below 
+        Oracle cs   -> SomeBuiltin $ Oracle.runOracle $ oracleParams cs    -- Oracle runs the runOracle contract and the oracleParams is defined above 
+        Swap oracle -> SomeBuiltin $ Oracle.swap oracle                    -- Given an Oracle value will run the swap contract with this value as parameter
 
-handlers :: SimulatorEffectHandlers (Builtin OracleContracts)
+handlers :: SimulatorEffectHandlers (Builtin OracleContracts)              -- copy and pasted boiler plate code 
 handlers =
     Simulator.mkSimulatorHandlers @(Builtin OracleContracts) []
     $ interpret handleOracleContracts
 
-initContract :: Contract (Last CurrencySymbol) BlockchainActions Text ()
+initContract :: Contract (Last CurrencySymbol) BlockchainActions Text ()   -- 
 initContract = do
-    ownPK <- pubKeyHash <$> ownPubKey
+    ownPK <- pubKeyHash <$> ownPubKey  -- look up own pubkey 
     cur   <-
         mapError (pack . show)
-        (Currency.forgeContract ownPK [(usdt, fromIntegral (length wallets) * amount)]
+        (Currency.forgeContract ownPK [(usdt, fromIntegral (length wallets) * amount)]     -- use forgeContract from Plutus Use Cases. Give each wallet USD 100.  Count how many wallets there are and multiply
         :: Contract (Last CurrencySymbol) BlockchainActions Currency.CurrencyError Currency.OneShotCurrency)
-    let cs = Currency.currencySymbol cur
-        v  = Value.singleton cs usdt amount
-    forM_ wallets $ \w -> do
+    let cs = Currency.currencySymbol cur    -- look up the currency symbol 
+        v  = Value.singleton cs usdt amount -- provide the value of how much each wallet should get 
+    forM_ wallets $ \w -> do                -- transactions to send each of the wallets the amount 
         let pkh = pubKeyHash $ walletPubKey w
-        when (pkh /= ownPK) $ do
+        when (pkh /= ownPK) $ do            -- one wallet to mint all the USD and then send it to the other wallets 
             tx <- submitTx $ mustPayToPubKey pkh v
             awaitTxConfirmed $ txId tx
-    tell $ Last $ Just cs
+    tell $ Last $ Just cs                   -- tell the Currency Symbol that was the result of forging 
   where
     amount :: Integer
     amount = 100_000_000
