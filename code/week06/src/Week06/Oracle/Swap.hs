@@ -102,117 +102,126 @@ mkSwapValidator oracle addr pkh () ctx =    -- takes two script inputs and anoth
       in
         pricePaid >= minPrice                                                  -- check the amount paid is larger than minPrice (allow for gratuity)
 
-data Swapping
+data Swapping                                                                  -- some boiler plate code
 instance Scripts.ScriptType Swapping where
     type instance DatumType Swapping = PubKeyHash
     type instance RedeemerType Swapping = ()
 
-swapInst :: Oracle -> Scripts.ScriptInstance Swapping
+swapInst :: Oracle -> Scripts.ScriptInstance Swapping                          -- only need to give one argument for template Haskell since Oracle's address is computed by oracleAddress below
 swapInst oracle = Scripts.validator @Swapping
     ($$(PlutusTx.compile [|| mkSwapValidator ||])
         `PlutusTx.applyCode` PlutusTx.liftCode oracle
-        `PlutusTx.applyCode` PlutusTx.liftCode (oracleAddress oracle))
+        `PlutusTx.applyCode` PlutusTx.liftCode (oracleAddress oracle))         -- to compute the Oracle's Address 
     $$(PlutusTx.compile [|| wrap ||])
   where
     wrap = Scripts.wrapValidator @PubKeyHash @()
 
-swapValidator :: Oracle -> Validator
+swapValidator :: Oracle -> Validator                                           -- some more boiler plate 
 swapValidator = Scripts.validatorScript . swapInst
 
-swapAddress :: Oracle -> Ledger.Address
+swapAddress :: Oracle -> Ledger.Address                                        -- some more boiler plate 
 swapAddress = scriptAddress . swapValidator
 
-offerSwap :: forall w s. HasBlockchainActions s => Oracle -> Integer -> Contract w s Text ()
+offerSwap :: forall w s. HasBlockchainActions s => Oracle -> Integer -> Contract w s Text ()    -- Seller uses OfferSwap which gets the Oracle and Integer (amount of lovelace to be sold) 
 offerSwap oracle amt = do
-    pkh <- pubKeyHash <$> Contract.ownPubKey
-    let tx = Constraints.mustPayToTheScript pkh $ Ada.lovelaceValueOf amt
-    ledgerTx <- submitTxConstraints (swapInst oracle) tx
-    awaitTxConfirmed $ txId ledgerTx
-    logInfo @String $ "offered " ++ show amt ++ " lovelace for swap"
+    pkh <- pubKeyHash <$> Contract.ownPubKey                                                    -- Look up sellers public key 
+    let tx = Constraints.mustPayToTheScript pkh $ Ada.lovelaceValueOf amt                       -- Locks the amount to be sold by taking pkh of seller and amt to be sold  
+    ledgerTx <- submitTxConstraints (swapInst oracle) tx                                        -- Submit the tx to the blockchain
+    awaitTxConfirmed $ txId ledgerTx                                                            -- Waits for confirmation
+    logInfo @String $ "offered " ++ show amt ++ " lovelace for swap"                            -- Logs the amount of lovelace offered for swapping 
 
-findSwaps :: HasBlockchainActions s => Oracle -> (PubKeyHash -> Bool) -> Contract w s Text [(TxOutRef, TxOutTx, PubKeyHash)]
+findSwaps :: HasBlockchainActions s => Oracle -> (PubKeyHash -> Bool) -> Contract w s Text [(TxOutRef, TxOutTx, PubKeyHash)]  -- helper function to find all swaps based on predicate (PubKeyHash -> Bool)
+                                                                                                                              -- returns list of all the UTXOs that sit at swap address
+                                                                                                                              -- reference to the UTXO (TxOutRef), UTXO (TxOutTx), Datum of UTXO (PubKeyHash)
 findSwaps oracle p = do
-    utxos <- utxoAt $ swapAddress oracle
-    return $ mapMaybe g $ Map.toList utxos
+    utxos <- utxoAt $ swapAddress oracle                             -- utxoAt gives all the UTXO at swap address 
+    return $ mapMaybe g $ Map.toList utxos                           -- use mapMaybe on the list of the map of utxos 
   where
-    f :: TxOutTx -> Maybe PubKeyHash
-    f o = do
-        dh        <- txOutDatumHash $ txOutTxOut o
-        (Datum d) <- Map.lookup dh $ txData $ txOutTxTx o
-        PlutusTx.fromData d
+    f :: TxOutTx -> Maybe PubKeyHash                                 -- takes one of the UTXO we are looking at and gives a Maybe PubKeyHash (if succeed then get a Just PubKeyHash)
+    f o = do                                                         -- we expect that all these swap UTXOs that the datum will be there and that it will be a pubKeyHash 
+        dh        <- txOutDatumHash $ txOutTxOut o                   -- look up the datumHash attached to the outputs 
+        (Datum d) <- Map.lookup dh $ txData $ txOutTxTx o            -- if succeeds then in the txData of the transaction (txOutTxTx) look up hash (dh) to get Datum d 
+        PlutusTx.fromData d                                          -- then deserialize it from d to get pubKeyHash 
 
-    g :: (TxOutRef, TxOutTx) -> Maybe (TxOutRef, TxOutTx, PubKeyHash)
+    g :: (TxOutRef, TxOutTx) -> Maybe (TxOutRef, TxOutTx, PubKeyHash) -- takes a pair of key and value and returns a Maybe key, value and pubKeyHash
     g (oref, o) = do
-        pkh <- f o
-        guard $ p pkh
-        return (oref, o, pkh)
+        pkh <- f o                                                    -- use the f helper function to get the public key hash which is the Datum now
+        guard $ p pkh                                                 -- guard checks to see whether the Datum of the UTXO satisfys the predicate p and returns true if it does
+        return (oref, o, pkh)                                         -- If true then returns the triple of oref, o, pkh (reference, UTXO and the Datum)
 
-retrieveSwaps :: HasBlockchainActions s => Oracle -> Contract w s Text ()
-retrieveSwaps oracle = do
-    pkh <- pubKeyHash <$> ownPubKey
-    xs <- findSwaps oracle (== pkh)
+retrieveSwaps :: HasBlockchainActions s => Oracle -> Contract w s Text ()  -- function to help seller retreive their funds back if they don't want to proceed with swap 
+retrieveSwaps oracle = do                                                  
+    pkh <- pubKeyHash <$> ownPubKey                                        -- takes the public key hash of seller 
+    xs <- findSwaps oracle (== pkh)                                        -- only takes the UTXOs sitting at that address that belong to seller (holder of pk)
     case xs of
-        [] -> logInfo @String "no swaps found"
-        _  -> do
-            let lookups = Constraints.unspentOutputs (Map.fromList [(oref, o) | (oref, o, _) <- xs]) <>
-                          Constraints.otherScript (swapValidator oracle)
-                tx      = mconcat [Constraints.mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toData () | (oref, _, _) <- xs]
-            ledgerTx <- submitTxConstraintsWith @Swapping lookups tx
-            awaitTxConfirmed $ txId ledgerTx
-            logInfo @String $ "retrieved " ++ show (length xs) ++ " swap(s)"
+        [] -> logInfo @String "no swaps found"                             -- if empty list (no swaps found that belong to the seller) then do nothing 
+        _  -> do                                                           -- otherwise construct a transaction that retreives all the swaps that belong to seller 
+            let lookups = Constraints.unspentOutputs (Map.fromList [(oref, o) | (oref, o, _) <- xs]) <>  -- finds all the UTXOs that belong to seller Map.fromList turns key value pairs into an action map 
+                          Constraints.otherScript (swapValidator oracle)   -- provide the validator of the swap which is parametrized by the Oracle. Must provide the validator in order to consumer script outputs
+                tx      = mconcat [Constraints.mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toData () | (oref, _, _) <- xs]  -- (oref, _, _) <- xs takes all the UTXOs in the list and for each of them
+                                                                                                                                 -- a constraint is built to spend the UTXOs 
+                                                                                                                                 -- mconcat combines a list of elements (doesn't matter how many) in a semigroup
+                                                                                                                                 -- tx will get all the lovelaces from all the UTXOs that sit at the swap address
+                                                                                                                                 -- belonging to the seller 
+            ledgerTx <- submitTxConstraintsWith @Swapping lookups tx         -- submit transaction to blockchain   
+            awaitTxConfirmed $ txId ledgerTx                                 -- wait for confirmation 
+            logInfo @String $ "retrieved " ++ show (length xs) ++ " swap(s)" -- log the number of swaps retreived  
 
-useSwap :: forall w s. HasBlockchainActions s => Oracle -> Contract w s Text ()
+useSwap :: forall w s. HasBlockchainActions s => Oracle -> Contract w s Text ()    -- 
 useSwap oracle = do
-    funds <- ownFunds
-    let amt = assetClassValueOf funds $ oAsset oracle
+    funds <- ownFunds                                   -- looks up your own wallet and adds up all the funds available. In this case the total amount of USD tokens available for swaps 
+    let amt = assetClassValueOf funds $ oAsset oracle   -- ownFunds is defined in Funds.hs. oAsset oracle specifies USD token and assetClassValueOf funds specifies the amount 
     logInfo @String $ "available assets: " ++ show amt
 
-    m <- findOracle oracle
+    m <- findOracle oracle                              -- findOracle is defined in the Core.hs. It finds the Oracle and the price of lovelaces 
     case m of
-        Nothing           -> logInfo @String "oracle not found"
-        Just (oref, o, x) -> do
+        Nothing           -> logInfo @String "oracle not found"  -- Oracle not found 
+        Just (oref, o, x) -> do                                  -- Oracle is found and oref and o reference the Oracle's UTXO and x is the exchange rate 
             logInfo @String $ "found oracle, exchange rate " ++ show x
-            pkh   <- pubKeyHash <$> Contract.ownPubKey
-            swaps <- findSwaps oracle (/= pkh)
-            case find (f amt x) swaps of
-                Nothing                -> logInfo @String "no suitable swap found"
-                Just (oref', o', pkh') -> do
-                    let v       = txOutValue (txOutTxOut o) <> lovelaceValueOf (oFee oracle)
-                        p       = assetClassValue (oAsset oracle) $ price (lovelaces $ txOutValue $ txOutTxOut o') x
+            pkh   <- pubKeyHash <$> Contract.ownPubKey           -- check our out public key 
+            swaps <- findSwaps oracle (/= pkh)                   -- find all the swaps where we are not the owner of the swap 
+            case find (f amt x) swaps of                         -- f is the predicate that takes the amount of funds available for swap and the exchange rate 'x' to find swaps we can afford  
+                Nothing                -> logInfo @String "no suitable swap found"  -- can't find any affordable swaps 
+                Just (oref', o', pkh') -> do                     -- if we do find a swap then just use the first one (not realistic, just an example for exercise)
+                    let v       = txOutValue (txOutTxOut o) <> lovelaceValueOf (oFee oracle)  -- now we construct a transaction for the swap
+                                                                                              -- v represents the total fees currently at the Oracle combined <> with our fees for using the Oracle 
+                        p       = assetClassValue (oAsset oracle) $ price (lovelaces $ txOutValue $ txOutTxOut o') x  -- p is the price we need to pay. price function take lovelaces in swap 'o' 
+                                                                                                                      -- and exchange rate 'x' to produce integer value that is converted to an assetClassValue USD 
                         lookups = Constraints.otherScript (swapValidator oracle)                     <>
                                   Constraints.otherScript (oracleValidator oracle)                   <>
-                                  Constraints.unspentOutputs (Map.fromList [(oref, o), (oref', o')])
-                        tx      = Constraints.mustSpendScriptOutput oref  (Redeemer $ PlutusTx.toData Use) <>
-                                  Constraints.mustSpendScriptOutput oref' (Redeemer $ PlutusTx.toData ())  <>
-                                  Constraints.mustPayToOtherScript
-                                    (validatorHash $ oracleValidator oracle)
-                                    (Datum $ PlutusTx.toData x)
-                                    v                                                                      <>
-                                  Constraints.mustPayToPubKey pkh' p
+                                  Constraints.unspentOutputs (Map.fromList [(oref, o), (oref', o')])           -- must provide the two UTXOs we want to consume, Oracle (oref, o) and the swap (oref', o')
+                        tx      = Constraints.mustSpendScriptOutput oref  (Redeemer $ PlutusTx.toData Use) <>  -- must use the Oracle as input (oref) and must use the 'Use' redeemer
+                                  Constraints.mustSpendScriptOutput oref' (Redeemer $ PlutusTx.toData ())  <>  -- must use the Swap input (oref'), which is a trivial Redeemer '()' in this case
+                                  Constraints.mustPayToOtherScript                                             -- mustPayToOtherScript refers to the Oracle script not the swap script 
+                                    (validatorHash $ oracleValidator oracle)                                   -- so we provide the Oracle hash 
+                                    (Datum $ PlutusTx.toData x)                                                -- must use the existing 'x' Datum (exchange rate) and not change it 
+                                    v                                                                      <>  -- 'v' computed as above
+                                  Constraints.mustPayToPubKey pkh' p                                           -- pay the seller of the lovelace the price we calculated 'p'
                     ledgerTx <- submitTxConstraintsWith @Swapping lookups tx
                     awaitTxConfirmed $ txId ledgerTx
-                    logInfo @String $ "made swap with price " ++ show (Value.flattenValue p)
+                    logInfo @String $ "made swap with price " ++ show (Value.flattenValue p)                   -- show (Value.flattenValue p) logs the price we paid for the lovelaces 
   where
     getPrice :: Integer -> TxOutTx -> Integer
-    getPrice x o = price (lovelaces $ txOutValue $ txOutTxOut o) x
+    getPrice x o = price (lovelaces $ txOutValue $ txOutTxOut o) x        -- price helper function is applied to the lovelaces contained in the swap output 'o' and the exchange rate 'x' 
 
-    f :: Integer -> Integer -> (TxOutRef, TxOutTx, PubKeyHash) -> Bool
-    f amt x (_, o, _) = getPrice x o <= amt
+    f :: Integer -> Integer -> (TxOutRef, TxOutTx, PubKeyHash) -> Bool    -- goes through the elements of swaps found to determine if suitable 
+    f amt x (_, o, _) = getPrice x o <= amt                               -- suitability is defined as total cost of swap is less than or equal to amount of funds available 
 
-type SwapSchema =
+type SwapSchema =                                                         -- the bundle that contains all the raw contracts above 
     BlockchainActions
-        .\/ Endpoint "offer"    Integer
-        .\/ Endpoint "retrieve" ()
-        .\/ Endpoint "use"      ()
-        .\/ Endpoint "funds"    ()
+        .\/ Endpoint "offer"    Integer                                   -- offer a swap for a given amount of lovelaces (Integer) 
+        .\/ Endpoint "retrieve" ()                                        -- to retreive the funds of all the swap seller has on offer 
+        .\/ Endpoint "use"      ()                                        -- to use a swap contract 
+        .\/ Endpoint "funds"    ()                                        -- funds will give the amount of funds currently available for swapping 
 
 swap :: Oracle -> Contract (Last Value) SwapSchema Text ()
-swap oracle = (offer `select` retrieve `select` use `select` funds) >> swap oracle
+swap oracle = (offer `select` retrieve `select` use `select` funds) >> swap oracle   -- 'select' operator waits until one endpoint is picked and executes that one. 
+                                                                                     -- '>>' sequence operator then recursively calls swap oracle over and over again to offer the four endpoints
   where
     offer :: Contract (Last Value) SwapSchema Text ()
-    offer = h $ do
-        amt <- endpoint @"offer"
-        offerSwap oracle amt
+    offer = h $ do               -- 'h' is the error handler 
+        amt <- endpoint @"offer" -- block with an offer endpoint until user provides the amt integer 
+        offerSwap oracle amt     -- then call the offerSwap oracle amt defined above 
 
     retrieve :: Contract (Last Value) SwapSchema Text ()
     retrieve = h $ do
@@ -227,8 +236,8 @@ swap oracle = (offer `select` retrieve `select` use `select` funds) >> swap orac
     funds :: Contract (Last Value) SwapSchema Text ()
     funds = h $ do
         endpoint @"funds"
-        v <- ownFunds
-        tell $ Last $ Just v
+        v <- ownFunds         -- ownFunds function is called to get the value of funds availabe 
+        tell $ Last $ Just v  -- tell is used to tell the outside world the value of funds available 
 
     h :: Contract (Last Value) SwapSchema Text () -> Contract (Last Value) SwapSchema Text ()
-    h = handleError logError
+    h = handleError logError  -- just logs error and continues to avoid crashing the constract.  h is used to wrap all the endpoints above :
