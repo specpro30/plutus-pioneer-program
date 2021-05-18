@@ -24,7 +24,7 @@ main = do
   where
     go :: UUID -> Maybe Integer -> IO a                         --
     go uuid m = do                                              -- m here is the old value of the exchange rate to check whether it has changed 
-        x <- getExchangeRate2                                    -- looks up ADAUSD exchange rate on coinmarketcap 
+        x <- getExchangeRate2                                    -- looks up ADAUSD exchange rate on coingecko 
         let y = Just x
         when (m /= y) $                                         -- if exchange rate has changed it calls updateOracle endpoint on our contract 
             updateOracle uuid x
@@ -58,7 +58,7 @@ getExchangeRate = runReq defaultHttpConfig $ do
     liftIO $ putStrLn $ "queried exchange rate: " ++ show d
     return x
 
-getExchangeRate2 :: IO Integer 
+getExchangeRate2 :: IO Integer                                     -- funcrion to get ADAUSD exchange rate from Coingecko 
 getExchangeRate2 = runReq defaultHttpConfig $ do
     v <- req 
         GET 
