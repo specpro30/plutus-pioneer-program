@@ -24,7 +24,7 @@ main = do
   where
     go :: UUID -> Maybe Integer -> IO a                         --
     go uuid m = do                                              -- m here is the old value of the exchange rate to check whether it has changed 
-        x <- getExchangeRate                                    -- looks up ADAUSD exchange rate on coinmarketcap 
+        x <- getExchangeRate2                                    -- looks up ADAUSD exchange rate on coinmarketcap 
         let y = Just x
         when (m /= y) $                                         -- if exchange rate has changed it calls updateOracle endpoint on our contract 
             updateOracle uuid x
@@ -57,3 +57,20 @@ getExchangeRate = runReq defaultHttpConfig $ do
         x               = round $ 1_000_000 * d -- multiply the exchange rate by 1 million and round it 
     liftIO $ putStrLn $ "queried exchange rate: " ++ show d
     return x
+
+getExchangeRate2 :: IO Integer 
+getExchangeRate2 = runReq defaultHttpConfig $ do
+    v <- req 
+        GET 
+        (https "coingecko.com" /: "en" /: "coins" /: "cardano")
+        NoReqBody 
+        bsResponse 
+        mempty 
+    let priceRegex      = "price.price\">\\$([\\.0-9]*)" :: ByteString  -- user regular expression to grab the value for demo purposes
+        (_, _, _, [bs]) = responseBody v =~ priceRegex :: (ByteString, ByteString, ByteString, [ByteString])
+        d               = read $ unpack bs :: Double                                
+        x               = round $ 1_000_000 * d -- multiply the exchange rate by 1 million and round it 
+    liftIO $ putStrLn $ "queried exchange rate: " ++ show d                                    
+    return x
+
+
