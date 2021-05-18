@@ -8,13 +8,16 @@ module Main
 import Control.Concurrent
 import Control.Monad          (when)
 import Control.Monad.IO.Class (MonadIO (..))
+import Control.Applicative
 import Data.ByteString        (ByteString)
 import Data.ByteString.Char8  (unpack)
 import Data.Proxy             (Proxy (..))
 import Data.Text              (pack)
 import Data.UUID
+import Data.Maybe
 import Network.HTTP.Req -- need this to do web requests
 import Text.Regex.TDFA
+import Prelude
 
 main :: IO ()
 main = do
@@ -24,11 +27,12 @@ main = do
   where
     go :: UUID -> Maybe Integer -> IO a                         --
     go uuid m = do                                              -- m here is the old value of the exchange rate to check whether it has changed 
-        x <- getExchangeRate2                                    -- looks up ADAUSD exchange rate on coingecko 
-        let y = Just x
+        x <- getExchangeRate                                    -- looks up ADAUSD exchange rate on coinmarketcap and prints it to screen
+        x' <- getExchangeRate2                                  -- looks up ADAUSD exchange rate on coingecko and prints it to screen
+        let y = Just (min x x') 
         when (m /= y) $                                         -- if exchange rate has changed it calls updateOracle endpoint on our contract 
-            updateOracle uuid x
-        threadDelay 5_000_000                                   -- waits for 5 seconds (should be 20 seconds since blocks appear on cardano every 20 seconds)
+            updateOracle uuid (min x x')
+        threadDelay 20_000_000                                   -- waits for 20 seconds (should be 20 seconds since blocks appear on cardano every 20 seconds)
         go uuid y                                               -- loops 
 
 updateOracle :: UUID -> Integer -> IO ()                        -- updateOracle demonstrates how to interact with a running contract 
@@ -55,10 +59,10 @@ getExchangeRate = runReq defaultHttpConfig $ do
         (_, _, _, [bs]) = responseBody v =~ priceRegex :: (ByteString, ByteString, ByteString, [ByteString])
         d               = read $ unpack bs :: Double
         x               = round $ 1_000_000 * d -- multiply the exchange rate by 1 million and round it 
-    liftIO $ putStrLn $ "queried exchange rate: " ++ show d
+    liftIO $ putStrLn $ "queried exchange rate from CMC: " ++ show d
     return x
 
-getExchangeRate2 :: IO Integer                                     -- funcrion to get ADAUSD exchange rate from Coingecko 
+getExchangeRate2 :: IO Integer                                     -- function to get ADAUSD exchange rate from Coingecko 
 getExchangeRate2 = runReq defaultHttpConfig $ do
     v <- req 
         GET 
@@ -69,8 +73,8 @@ getExchangeRate2 = runReq defaultHttpConfig $ do
     let priceRegex      = "price.price\">\\$([\\.0-9]*)" :: ByteString  -- user regular expression to grab the value for demo purposes
         (_, _, _, [bs]) = responseBody v =~ priceRegex :: (ByteString, ByteString, ByteString, [ByteString])
         d               = read $ unpack bs :: Double                                
-        x               = round $ 1_000_000 * d -- multiply the exchange rate by 1 million and round it 
-    liftIO $ putStrLn $ "queried exchange rate: " ++ show d                                    
-    return x
+        x'               = round $ 1_000_000 * d -- multiply the exchange rate by 1 million and round it 
+    liftIO $ putStrLn $ "queried exchange rate from CG: " ++ show d                                    
+    return x'
 
 
