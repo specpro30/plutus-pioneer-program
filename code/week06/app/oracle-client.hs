@@ -29,9 +29,9 @@ main = do
     go uuid m = do                                              -- m here is the old value of the exchange rate to check whether it has changed 
         x <- getExchangeRate                                    -- looks up ADAUSD exchange rate on coinmarketcap and prints it to screen
         x' <- getExchangeRate2                                  -- looks up ADAUSD exchange rate on coingecko and prints it to screen
-        let y = Just (min x x') 
+        let y = Just (average x x') 
         when (m /= y) $                                         -- if exchange rate has changed it calls updateOracle endpoint on our contract 
-            updateOracle uuid (min x x')
+            updateOracle uuid (average x x')
         threadDelay 20_000_000                                   -- waits for 20 seconds (should be 20 seconds since blocks appear on cardano every 20 seconds)
         go uuid y                                               -- loops 
 
@@ -77,4 +77,5 @@ getExchangeRate2 = runReq defaultHttpConfig $ do
     liftIO $ putStrLn $ "queried exchange rate from CG: " ++ show d                                    
     return x'
 
-
+average :: Integer -> Integer -> Integer
+average a b  = (a + b) `div` 2
